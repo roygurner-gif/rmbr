@@ -1,0 +1,581 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>RMBR -Life Board</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#0a0a0f; color:#e0e0e0; font-family:'SF Mono',Menlo,monospace; height:100vh; display:flex; flex-direction:column; }
+
+/* Header */
+.header { background:#0d0d14; border-bottom:1px solid #1a1a2e; padding:12px 24px; display:flex; justify-content:space-between; align-items:center; }
+.logo { font-size:18px; font-weight:700; color:#f59e0b; letter-spacing:3px; }
+.logo span { color:#555; font-size:11px; font-weight:300; margin-left:8px; }
+.header-right { display:flex; gap:16px; align-items:center; }
+.time { color:#555; font-size:11px; }
+
+/* Status bar */
+.status-bar { background:#0d0d14; border-top:1px solid #1a1a2e; padding:10px 24px; display:flex; gap:24px; align-items:center; flex-shrink:0; }
+.stat { display:flex; align-items:center; gap:8px; }
+.stat-value { color:#0f6; font-size:14px; font-weight:700; }
+.stat-label { color:#555; font-size:10px; text-transform:uppercase; letter-spacing:1px; }
+.stat-ok { color:#0f6; font-size:12px; }
+.stat-warn { color:#f59e0b; font-size:12px; }
+
+/* Board */
+.board { flex:1; display:flex; gap:16px; padding:16px; overflow-x:auto; }
+.column { flex:1; min-width:280px; border-radius:12px; display:flex; flex-direction:column; }
+.column[data-col="todo"] { background:rgba(200,30,30,0.08); border:1px solid rgba(200,30,30,0.3); }
+.column[data-col="doing"] { background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.2); }
+.column[data-col="done"] { background:rgba(30,60,200,0.08); border:1px solid rgba(30,60,200,0.3); }
+.column-header { padding:14px 16px; border-bottom:1px solid rgba(255,255,255,0.1); display:flex; justify-content:space-between; align-items:center; }
+.column[data-col="todo"] .column-title { color:#e84040; }
+.column[data-col="doing"] .column-title { color:#ffffff; }
+.column[data-col="done"] .column-title { color:#4070e8; }
+.column-title { font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:2px; }
+.column[data-col="todo"] .column-count { background:rgba(200,30,30,0.2); color:#e84040; }
+.column[data-col="doing"] .column-count { background:rgba(255,255,255,0.1); color:#fff; }
+.column[data-col="done"] .column-count { background:rgba(30,60,200,0.2); color:#4070e8; }
+.column-count { padding:2px 8px; border-radius:10px; font-size:10px; font-weight:600; }
+.column-body { flex:1; padding:8px; overflow-y:auto; }
+
+/* Cards */
+.card { background:#0d0d14; border:1px solid #1a1a2e; border-radius:8px; padding:14px; margin-bottom:8px; cursor:grab; transition:all 0.15s; position:relative; }
+.card:hover { transform:translateY(-1px); box-shadow:0 4px 12px rgba(0,0,0,0.3); }
+.column[data-col="todo"] .card:hover { border-color:rgba(200,30,30,0.5); }
+.column[data-col="doing"] .card:hover { border-color:rgba(255,255,255,0.3); }
+.column[data-col="done"] .card:hover { border-color:rgba(30,60,200,0.5); }
+.card.dragging { opacity:0.5; }
+.card-title { font-size:13px; color:#fff; font-weight:500; margin-bottom:6px; }
+.card-detail { font-size:11px; color:#666; line-height:1.5; }
+.card-tag { display:inline-block; padding:2px 8px; border-radius:4px; font-size:9px; font-weight:600; text-transform:uppercase; letter-spacing:1px; margin-top:8px; }
+.tag-urgent { background:rgba(255,68,68,0.15); color:#f44; border:1px solid rgba(255,68,68,0.3); }
+.tag-money { background:rgba(0,255,100,0.1); color:#0f6; border:1px solid rgba(0,255,100,0.3); }
+.tag-health { background:rgba(0,200,255,0.1); color:#0cf; border:1px solid rgba(0,200,255,0.3); }
+.tag-build { background:rgba(245,158,11,0.15); color:#f59e0b; border:1px solid rgba(245,158,11,0.3); }
+.tag-life { background:rgba(200,100,255,0.1); color:#c8f; border:1px solid rgba(200,100,255,0.3); }
+.card-due { position:absolute; top:10px; right:12px; font-size:10px; color:#555; }
+.card .delete { position:absolute; bottom:10px; right:10px; color:#8b5cf6; font-size:16px; font-weight:700; cursor:pointer; width:22px; height:22px; display:flex; align-items:center; justify-content:center; border-radius:4px; }
+.card .delete:hover { background:rgba(139,92,246,0.2); color:#a78bfa; }
+
+/* Drop zone highlight */
+.column-body.drag-over { background:rgba(245,158,11,0.03); border-radius:8px; }
+
+/* Card Dock */
+.card-dock { display:flex; gap:8px; padding:8px 24px; background:#0a0a0f; border-top:1px solid #1a1a2e; overflow-x:auto; flex-shrink:0; }
+.dock-card { min-width:130px; background:#111118; border:1px solid #1a1a2e; border-radius:8px; padding:10px 14px; cursor:pointer; transition:all 0.15s; flex-shrink:0; }
+.dock-card:hover { border-color:#8b5cf6; transform:translateY(-2px); }
+.dock-card-icon { font-size:16px; margin-bottom:4px; }
+.dock-card-title { font-size:11px; font-weight:600; color:#fff; margin-bottom:2px; }
+.dock-card-detail { font-size:10px; color:#666; }
+.dock-add { min-width:50px; background:none; border:1px dashed #1a1a2e; border-radius:8px; display:flex; align-items:center; justify-content:center; cursor:pointer; color:#333; font-size:18px; flex-shrink:0; }
+.dock-add:hover { border-color:#8b5cf6; color:#8b5cf6; }
+
+/* Dock modal */
+.dock-modal-overlay { display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.7); z-index:200; justify-content:center; align-items:center; }
+.dock-modal-overlay.show { display:flex; }
+.dock-modal { background:#111118; border:1px solid #1a1a2e; border-radius:12px; padding:24px; width:400px; max-height:80vh; overflow-y:auto; }
+.dock-modal h3 { color:#8b5cf6; margin-bottom:16px; font-size:14px; }
+.dock-field { margin-bottom:10px; }
+.dock-field label { display:block; color:#666; font-size:10px; margin-bottom:4px; text-transform:uppercase; letter-spacing:1px; }
+.dock-field input { width:100%; padding:10px; background:#0a0a0f; border:1px solid #1a1a2e; color:#e0e0e0; font-family:inherit; font-size:13px; border-radius:6px; }
+.dock-full-detail { background:#0a0a0f; border:1px solid #1a1a2e; border-radius:8px; padding:16px; margin-bottom:10px; }
+.dock-full-detail .field-row { display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px solid #0d0d14; font-size:13px; }
+.dock-full-detail .field-label { color:#666; }
+.dock-full-detail .field-value { color:#fff; }
+
+/* Ask bar */
+.ask-bar { background:#0d0d14; border-top:1px solid #1a1a2e; padding:10px 24px; display:flex; gap:8px; }
+.ask-input { flex:1; background:#111118; border:1px solid #1a1a2e; color:#e0e0e0; padding:10px 14px; font-family:inherit; font-size:13px; border-radius:8px; }
+.ask-input:focus { outline:none; border-color:#f59e0b; }
+.ask-btn { background:#f59e0b; color:#0a0a0f; border:none; padding:10px 20px; font-family:inherit; font-size:12px; font-weight:600; border-radius:8px; cursor:pointer; letter-spacing:1px; }
+.ask-answer { color:#ccc; font-size:12px; padding:0 24px 10px; background:#0d0d14; line-height:1.5; }
+
+/* Add card */
+.add-card { padding:8px; }
+.add-btn { width:100%; padding:8px; background:none; border:1px dashed #1a1a2e; color:#333; font-family:inherit; font-size:11px; cursor:pointer; border-radius:6px; }
+.column[data-col="todo"] .add-btn:hover { border-color:#e84040; color:#e84040; }
+.column[data-col="doing"] .add-btn:hover { border-color:#fff; color:#fff; }
+.column[data-col="done"] .add-btn:hover { border-color:#4070e8; color:#4070e8; }
+
+/* Modal for adding */
+.modal-overlay { display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.7); z-index:100; justify-content:center; align-items:center; }
+.modal-overlay.show { display:flex; }
+.modal { background:#111118; border:1px solid #1a1a2e; border-radius:12px; padding:24px; width:400px; }
+.modal h3 { color:#f59e0b; margin-bottom:16px; font-size:14px; }
+.modal input, .modal select { width:100%; padding:10px; background:#0a0a0f; border:1px solid #1a1a2e; color:#e0e0e0; font-family:inherit; font-size:13px; border-radius:6px; margin-bottom:10px; }
+.modal-btns { display:flex; gap:8px; margin-top:12px; }
+.modal-btns button { flex:1; padding:10px; border:none; font-family:inherit; font-size:12px; font-weight:600; border-radius:6px; cursor:pointer; }
+.modal-save { background:#f59e0b; color:#0a0a0f; }
+.modal-cancel { background:#1a1a2e; color:#888; }
+</style>
+</head>
+<body>
+
+<div class="header">
+    <div><span class="logo">RMBR<span>Quantum Operating System</span></span></div>
+    <div class="header-right">
+        <span class="time" id="time"></span>
+    </div>
+</div>
+
+<div class="board" id="board">
+    <div class="column" data-col="todo">
+        <div class="column-header">
+            <span class="column-title">To Do</span>
+            <span class="column-count" id="todo-count">0</span>
+        </div>
+        <div class="column-body" id="todo"></div>
+        <div class="add-card"><button class="add-btn" onclick="showAddModal('todo')">+ Add Card</button></div>
+    </div>
+    <div class="column" data-col="doing">
+        <div class="column-header">
+            <span class="column-title">In Progress</span>
+            <span class="column-count" id="doing-count">0</span>
+        </div>
+        <div class="column-body" id="doing"></div>
+        <div class="add-card"><button class="add-btn" onclick="showAddModal('doing')">+ Add Card</button></div>
+    </div>
+    <div class="column" data-col="done">
+        <div class="column-header">
+            <span class="column-title">Done</span>
+            <span class="column-count" id="done-count">0</span>
+        </div>
+        <div class="column-body" id="done"></div>
+    </div>
+</div>
+
+<div class="card-dock" id="cardDock"></div>
+<div class="ask-answer" id="answer"></div>
+<div class="ask-bar">
+    <input class="ask-input" id="askInput" placeholder="RMBR, what's my..." onkeypress="if(event.key==='Enter')askRmbr()">
+    <button class="ask-btn" onclick="askRmbr()">ASK</button>
+</div>
+
+<div class="status-bar">
+    <div class="stat">
+        <span class="stat-value" id="sBalance">—</span>
+        <span class="stat-ok" id="sOk"></span>
+    </div>
+    <div class="stat">
+        <span class="stat-label">Next bill</span>
+        <span class="stat-value" id="sBill" style="color:#f59e0b">—</span>
+    </div>
+    <div class="stat">
+        <span class="stat-label">Email</span>
+        <span class="stat-value" id="sEmail">—</span>
+    </div>
+    <div class="stat">
+        <span class="stat-label">Next</span>
+        <span class="stat-value" id="sCal" style="color:#0cf">—</span>
+    </div>
+    <div class="stat">
+        <span class="stat-label">GH</span>
+        <span class="stat-value" id="sGh">—</span>
+    </div>
+</div>
+
+<!-- Dock Card View Modal -->
+<div class="dock-modal-overlay" id="dockViewModal">
+    <div class="dock-modal">
+        <h3 id="dockViewTitle">Card</h3>
+        <div class="dock-full-detail" id="dockViewFields"></div>
+        <div class="modal-btns">
+            <button class="modal-cancel" onclick="closeDockView()">Close</button>
+            <button class="modal-save" style="background:#f44" onclick="deleteDockCard()">Delete</button>
+        </div>
+    </div>
+</div>
+
+<!-- Add Dock Card Modal -->
+<div class="dock-modal-overlay" id="dockAddModal">
+    <div class="dock-modal">
+        <h3>Add Card</h3>
+        <div class="dock-field">
+            <label>Type</label>
+            <select id="dockType" style="width:100%;padding:10px;background:#0a0a0f;border:1px solid #1a1a2e;color:#e0e0e0;font-family:inherit;font-size:13px;border-radius:6px;" onchange="updateDockFields()">
+                <option value="insurance">Insurance</option>
+                <option value="id">ID / License</option>
+                <option value="rx">Prescription</option>
+                <option value="membership">Membership</option>
+                <option value="emergency">Emergency Contact</option>
+                <option value="custom">Custom</option>
+            </select>
+        </div>
+        <div id="dockAddFields"></div>
+        <div class="modal-btns">
+            <button class="modal-cancel" onclick="closeDockAdd()">Cancel</button>
+            <button class="modal-save" onclick="saveDockCard()">Save</button>
+        </div>
+    </div>
+</div>
+
+<!-- Edit Card Modal -->
+<div class="modal-overlay" id="editModal">
+    <div class="modal">
+        <h3 style="color:#8b5cf6">Edit Card</h3>
+        <input id="editTitle" placeholder="Title">
+        <input type="datetime-local" id="editDue">
+        <select id="editTag">
+            <option value="life">Life</option>
+            <option value="money">Money</option>
+            <option value="health">Health</option>
+            <option value="build">Build</option>
+            <option value="urgent">Urgent</option>
+        </select>
+        <label style="color:#666;font-size:11px;margin-bottom:4px;display:block">Notes</label>
+        <textarea id="editNotes" placeholder="Add notes..." style="width:100%;padding:10px;background:#0a0a0f;border:1px solid #1a1a2e;color:#e0e0e0;font-family:inherit;font-size:13px;border-radius:6px;margin-bottom:10px;min-height:120px;resize:vertical"></textarea>
+        <input type="hidden" id="editId">
+        <input type="hidden" id="editCol">
+        <div class="modal-btns">
+            <button class="modal-cancel" onclick="hideEditModal()">Cancel</button>
+            <button class="modal-save" onclick="saveEdit()">Save</button>
+        </div>
+    </div>
+</div>
+
+<!-- Add Card Modal -->
+<div class="modal-overlay" id="addModal">
+    <div class="modal">
+        <h3>New Card</h3>
+        <input id="newTitle" placeholder="What needs doing?">
+        <input id="newDetail" placeholder="Details (optional)">
+        <select id="newTag">
+            <option value="life">Life</option>
+            <option value="money">Money</option>
+            <option value="health">Health</option>
+            <option value="build">Build</option>
+            <option value="urgent">Urgent</option>
+        </select>
+        <input type="datetime-local" id="newDue">
+        <input type="hidden" id="newCol">
+        <div class="modal-btns">
+            <button class="modal-cancel" onclick="hideAddModal()">Cancel</button>
+            <button class="modal-save" onclick="addCard()">Add</button>
+        </div>
+    </div>
+</div>
+
+<script>
+// ============================================================
+// BOARD STATE -saved to localStorage
+// ============================================================
+const DEFAULT_CARDS = {
+    todo: [
+        {id:'c1', title:'Hat pricing', detail:'Nilla Nation merch -get quotes', tag:'build', due:'Tue 3pm'},
+        {id:'c2', title:'IRRRL call', detail:'Lender -rates at 5.375, you are at 6.375', tag:'money', due:'This week'},
+        {id:'c3', title:'Show HN -Cloxy', detail:'Post to Hacker News after one week', tag:'build', due:'Next week'},
+        {id:'c4', title:'Register RMBR domains', detail:'rmbr.app, tizm.io, tardcard.com', tag:'build', due:''},
+        {id:'c5', title:'Intent to File', detail:'VA.gov -locks effective date', tag:'urgent', due:'ASAP'},
+        {id:'c6', title:'DNS nillanation.com', detail:'Point to 148.230.94.100', tag:'build', due:''},
+    ],
+    doing: [
+        {id:'c7', title:'VA Claim', detail:'VSO appointment Monday 9am\nBring: DD-214, denial letter, Dubai docs', tag:'urgent', due:'Mon 9am'},
+        {id:'c8', title:'Dubai doc form', detail:'Emailed -waiting for updated VA form with surgical findings', tag:'health', due:'Waiting'},
+        {id:'c9', title:'L3Harris', detail:'Interview done. BD Tech Lead UAE. Waiting on response.', tag:'money', due:'Pending'},
+        {id:'c10', title:'Quit drinking', detail:'Magnesium, hot tub, water gallon, shakes', tag:'health', due:'Starting'},
+        {id:'c11', title:'RSUs vest', detail:'Viasat -$56K at $56/share. DO NOT QUIT BEFORE THIS.', tag:'money', due:'May 6'},
+    ],
+    done: [
+        {id:'c12', title:'L3Harris interview', detail:'BD Tech Lead -got nervous but solid', tag:'money', due:''},
+        {id:'c13', title:'nillanation.com', detail:'Site built on VPS, needs DNS flip', tag:'build', due:''},
+        {id:'c14', title:'QOS kernel', detail:'Bare metal Rust kernel -booted in QEMU', tag:'build', due:''},
+        {id:'c15', title:'RMBR dashboard', detail:'Running on :8889 with AI, calendar, email', tag:'build', due:''},
+        {id:'c16', title:'Swalwell section', detail:'Added to roygurner.com', tag:'build', due:''},
+        {id:'c17', title:'Paper XIX updated', detail:'Full hemisphere -1B people, 33K reps', tag:'build', due:''},
+        {id:'c18', title:'French scanner blocked', detail:'185.177.72.0/24 subnet blocked on VPS', tag:'build', due:''},
+    ]
+};
+
+let board = JSON.parse(localStorage.getItem('rmbr-board')) || JSON.parse(JSON.stringify(DEFAULT_CARDS));
+let draggedCard = null;
+let draggedFrom = null;
+
+function saveBoard() {
+    localStorage.setItem('rmbr-board', JSON.stringify(board));
+}
+
+function renderBoard() {
+    ['todo','doing','done'].forEach(col => {
+        const el = document.getElementById(col);
+        const cards = board[col] || [];
+        document.getElementById(col + '-count').textContent = cards.length;
+        el.innerHTML = cards.map(c => `
+            <div class="card" draggable="true" data-id="${c.id}" data-col="${col}"
+                 ondragstart="onDragStart(event)" ondragend="onDragEnd(event)"
+                 onclick="openCard('${col}','${c.id}',event)">
+                <div class="card-title">${c.title}</div>
+                <div class="card-detail">${(c.detail||'').replace(/\n/g,'<br>')}</div>
+                ${c.due ? `<div class="card-due">${formatDue(c.due)}</div>` : ''}
+                <span class="card-tag tag-${c.tag}">${c.tag}</span>
+                ${c.notes ? '<span style="color:#8b5cf6;font-size:10px;margin-left:6px">📝</span>' : ''}
+                <span class="delete" onclick="event.stopPropagation();deleteCard('${col}','${c.id}')">&times;</span>
+            </div>
+        `).join('');
+    });
+}
+
+function formatDue(due) {
+    if (!due) return '';
+    const d = new Date(due);
+    if (isNaN(d)) return due; // fallback for old text dates like "Mon 9am"
+    return d.toLocaleDateString('en-US', {month:'short', day:'numeric'}) + ' ' + d.toLocaleTimeString('en-US', {hour:'numeric', minute:'2-digit'});
+}
+
+// ============================================================
+// DRAG AND DROP
+// ============================================================
+function onDragStart(e) {
+    draggedCard = e.target.dataset.id;
+    draggedFrom = e.target.dataset.col;
+    e.target.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+}
+
+function onDragEnd(e) {
+    e.target.classList.remove('dragging');
+    document.querySelectorAll('.column-body').forEach(el => el.classList.remove('drag-over'));
+}
+
+document.querySelectorAll('.column-body').forEach(el => {
+    el.addEventListener('dragover', e => {
+        e.preventDefault();
+        el.classList.add('drag-over');
+    });
+    el.addEventListener('dragleave', e => {
+        el.classList.remove('drag-over');
+    });
+    el.addEventListener('drop', e => {
+        e.preventDefault();
+        el.classList.remove('drag-over');
+        const toCol = el.id;
+        if (draggedCard && draggedFrom && draggedFrom !== toCol) {
+            const idx = board[draggedFrom].findIndex(c => c.id === draggedCard);
+            if (idx > -1) {
+                const [card] = board[draggedFrom].splice(idx, 1);
+                board[toCol].push(card);
+                saveBoard();
+                renderBoard();
+            }
+        }
+    });
+});
+
+// ============================================================
+// ADD / DELETE CARDS
+// ============================================================
+function showAddModal(col) {
+    document.getElementById('newCol').value = col;
+    document.getElementById('newTitle').value = '';
+    document.getElementById('newDetail').value = '';
+    document.getElementById('newDue').value = '';
+    document.getElementById('addModal').classList.add('show');
+    document.getElementById('newTitle').focus();
+}
+
+function hideAddModal() {
+    document.getElementById('addModal').classList.remove('show');
+}
+
+function addCard() {
+    const col = document.getElementById('newCol').value;
+    const title = document.getElementById('newTitle').value.trim();
+    if (!title) return;
+    const card = {
+        id: 'c' + Date.now(),
+        title: title,
+        detail: document.getElementById('newDetail').value.trim(),
+        tag: document.getElementById('newTag').value,
+        due: document.getElementById('newDue').value.trim()
+    };
+    board[col].push(card);
+    saveBoard();
+    renderBoard();
+    hideAddModal();
+}
+
+function deleteCard(col, id) {
+    board[col] = board[col].filter(c => c.id !== id);
+    saveBoard();
+    renderBoard();
+}
+
+function openCard(col, id, event) {
+    if (event.target.classList.contains('delete')) return;
+    const card = board[col].find(c => c.id === id);
+    if (!card) return;
+    document.getElementById('editId').value = id;
+    document.getElementById('editCol').value = col;
+    document.getElementById('editTitle').value = card.title;
+    document.getElementById('editDue').value = card.due || '';
+    document.getElementById('editTag').value = card.tag || 'life';
+    document.getElementById('editNotes').value = card.notes || card.detail || '';
+    document.getElementById('editModal').classList.add('show');
+    document.getElementById('editNotes').focus();
+}
+
+function hideEditModal() {
+    document.getElementById('editModal').classList.remove('show');
+}
+
+function saveEdit() {
+    const col = document.getElementById('editCol').value;
+    const id = document.getElementById('editId').value;
+    const card = board[col].find(c => c.id === id);
+    if (!card) return;
+    card.title = document.getElementById('editTitle').value.trim();
+    card.due = document.getElementById('editDue').value.trim();
+    card.tag = document.getElementById('editTag').value;
+    card.notes = document.getElementById('editNotes').value.trim();
+    card.detail = card.notes.split('\n')[0];
+    saveBoard();
+    renderBoard();
+    hideEditModal();
+}
+
+// ============================================================
+// STATUS BAR -pulls from RMBR API
+// ============================================================
+async function loadStatus() {
+    try {
+        const r = await fetch('/api/status');
+        const d = await r.json();
+        if (d.bank_balance !== null) {
+            document.getElementById('sBalance').textContent = '$' + d.bank_balance.toLocaleString();
+            document.getElementById('sOk').textContent = '\u2713';
+        }
+        if (d.next_bill) document.getElementById('sBill').textContent = d.next_bill;
+
+        const real = (d.emails||[]).filter(e => !e.spam).length;
+        const spam = (d.emails||[]).length - real;
+        document.getElementById('sEmail').textContent = real + ' real';
+
+        const cal = d.calendar || [];
+        if (cal.length > 0) {
+            document.getElementById('sCal').textContent = cal[0].title.split('(')[0].trim();
+        }
+    } catch(e) {}
+}
+
+// ============================================================
+// ASK RMBR
+// ============================================================
+async function askRmbr() {
+    const input = document.getElementById('askInput');
+    const answer = document.getElementById('answer');
+    const q = input.value.trim();
+    if (!q) return;
+    answer.textContent = 'thinking...';
+    answer.style.color = '#f59e0b';
+    try {
+        const r = await fetch('/api/ask', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({question: q})
+        });
+        const d = await r.json();
+        answer.textContent = d.answer;
+        answer.style.color = '#ccc';
+    } catch(e) {
+        answer.textContent = 'LLM offline';
+        answer.style.color = '#f44';
+    }
+    input.value = '';
+}
+
+// ============================================================
+// DOCK -wallet cards
+// ============================================================
+const DOCK_ICONS = {insurance:'INS', id:'ID', rx:'Rx', membership:'MBR', emergency:'SOS', custom:'...'};
+const DOCK_FIELDS = {
+    insurance: ['Provider','ID Number','Group','Phone','Copay'],
+    id: ['Type','Number','Expires','State'],
+    rx: ['Medication','Dose','Frequency','Pharmacy','Refill Date'],
+    membership: ['Store','Member ID','Expires'],
+    emergency: ['Name','Relationship','Phone','Alt Phone'],
+    custom: ['Field 1','Field 2','Field 3']
+};
+
+let dockCards = JSON.parse(localStorage.getItem('knbn-dock')) || [
+    {type:'insurance', icon:'INS', title:'Vision - VSP', fields:{Provider:'VSP',ID:'',Group:'',Phone:'',Copay:'$25'}},
+    {type:'insurance', icon:'INS', title:'Health', fields:{Provider:'',ID:'',Group:'',Phone:'',Copay:''}},
+    {type:'rx', icon:'Rx', title:'Medications', fields:{Medication:'Magnesium',Dose:'400mg',Frequency:'Nightly',Pharmacy:'','Refill Date':''}},
+];
+let viewingDockIdx = -1;
+
+function saveDock() { localStorage.setItem('knbn-dock', JSON.stringify(dockCards)); }
+
+function renderDock() {
+    const el = document.getElementById('cardDock');
+    el.innerHTML = dockCards.map((c,i) => `
+        <div class="dock-card" onclick="viewDockCard(${i})">
+            <div class="dock-card-icon">${c.icon || DOCK_ICONS[c.type]}</div>
+            <div class="dock-card-title">${c.title}</div>
+            <div class="dock-card-detail">${Object.values(c.fields).filter(v=>v).join(' · ').substring(0,30)}</div>
+        </div>
+    `).join('') + '<div class="dock-add" onclick="openDockAdd()">+</div>';
+}
+
+function viewDockCard(idx) {
+    viewingDockIdx = idx;
+    const c = dockCards[idx];
+    document.getElementById('dockViewTitle').textContent = c.icon + ' ' + c.title;
+    let html = '';
+    for (const [k,v] of Object.entries(c.fields)) {
+        html += `<div class="field-row"><span class="field-label">${k}</span><span class="field-value">${v||'—'}</span></div>`;
+    }
+    document.getElementById('dockViewFields').innerHTML = html;
+    document.getElementById('dockViewModal').classList.add('show');
+}
+
+function closeDockView() { document.getElementById('dockViewModal').classList.remove('show'); }
+
+function deleteDockCard() {
+    if (viewingDockIdx >= 0) {
+        dockCards.splice(viewingDockIdx, 1);
+        saveDock(); renderDock(); closeDockView();
+    }
+}
+
+function openDockAdd() {
+    document.getElementById('dockType').value = 'insurance';
+    updateDockFields();
+    document.getElementById('dockAddModal').classList.add('show');
+}
+
+function closeDockAdd() { document.getElementById('dockAddModal').classList.remove('show'); }
+
+function updateDockFields() {
+    const type = document.getElementById('dockType').value;
+    const fields = DOCK_FIELDS[type];
+    let html = '<div class="dock-field"><label>Title</label><input id="dockTitle" placeholder="e.g. VSP Vision"></div>';
+    fields.forEach((f,i) => {
+        html += `<div class="dock-field"><label>${f}</label><input id="dockF${i}" placeholder="${f}"></div>`;
+    });
+    document.getElementById('dockAddFields').innerHTML = html;
+}
+
+function saveDockCard() {
+    const type = document.getElementById('dockType').value;
+    const title = document.getElementById('dockTitle').value.trim();
+    if (!title) return;
+    const fieldNames = DOCK_FIELDS[type];
+    const fields = {};
+    fieldNames.forEach((f,i) => { fields[f] = document.getElementById('dockF'+i).value.trim(); });
+    dockCards.push({type, icon:DOCK_ICONS[type], title, fields});
+    saveDock(); renderDock(); closeDockAdd();
+}
+
+// ============================================================
+// INIT
+// ============================================================
+function updateTime() {
+    document.getElementById('time').textContent = new Date().toLocaleString();
+}
+updateTime(); setInterval(updateTime, 1000);
+renderBoard();
+renderDock();
+loadStatus();
+setInterval(loadStatus, 60000);
+</script>
+</body>
+</html>
