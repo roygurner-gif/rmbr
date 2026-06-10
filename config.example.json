@@ -1,0 +1,10 @@
+{
+  "vps_host": "your.vps.example.com",
+  "vps_ssh_user": "root",
+  "mail_accounts": [
+    {"user": "you@yourdomain.com", "server": "your.vps.example.com", "port": 993}
+  ],
+  "mail_passwords_file": "~/.rmbr/mail_passwords.json",
+  "local_llm_url": "http://localhost:8003/v1/chat/completions",
+  "local_llm_model": "mlx-community/Qwen2.5-14B-Instruct-4bit"
+}

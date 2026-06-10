@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """
 RMBR — Remember Everything You Forget
-QOS Service — Life Dashboard
+Single-screen life dashboard: email + calendar + finances + ask-an-LLM.
 
-Pulls email from Dovecot on VPS, monitors systems, shows you
-everything you need to know on one screen.
-
-Roy W. Gurner | Occam Engineering | 2026
+MIT licensed.
 """
 import os
 import sys
@@ -21,20 +18,34 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from email.header import decode_header
 
-PORT = 8889
-VPS_HOST = "148.230.94.100"
+PORT = int(os.environ.get("RMBR_PORT", "8889"))
 REFRESH_INTERVAL = 300  # 5 minutes
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-LLM_BACKEND = "anthropic" if ANTHROPIC_API_KEY else "local"
 
-# Email accounts to check
-MAIL_ACCOUNTS = [
-    {"user": "roy@anticloud.pro", "server": VPS_HOST, "port": 993},
-    {"user": "contact@pepperpllc.com", "server": VPS_HOST, "port": 993},
-    {"user": "contact@simpl.studio", "server": VPS_HOST, "port": 993},
-]
+CONFIG_PATH = Path(os.environ.get("RMBR_CONFIG", str(Path.home() / ".rmbr" / "config.json")))
 
-# State
+DEFAULT_CONFIG = {
+    "vps_host": "",
+    "vps_ssh_user": "root",
+    "mail_accounts": [],
+    "mail_passwords_file": "",
+    "local_llm_url": "http://localhost:8003/v1/chat/completions",
+    "local_llm_model": "mlx-community/Qwen2.5-14B-Instruct-4bit",
+}
+
+def load_config():
+    cfg = dict(DEFAULT_CONFIG)
+    if CONFIG_PATH.exists():
+        try:
+            with open(CONFIG_PATH) as f:
+                cfg.update(json.load(f))
+        except Exception as e:
+            print(f"  [RMBR] config load error: {e}", file=sys.stderr)
+    if os.environ.get("RMBR_VPS_HOST"):
+        cfg["vps_host"] = os.environ["RMBR_VPS_HOST"]
+    return cfg
+
+CONFIG = load_config()
+
 STATE = {
     "emails": [],
     "email_count": 0,
@@ -72,7 +83,6 @@ def check_calendar():
     except Exception as e:
         STATE["calendar"] = [{"title": f"Calendar error: {e}", "when": ""}]
 
-# Bot filter for spam detection
 SPAM_KEYWORDS = [
     "cloud storage", "urology", "wellness insider", "weight loss",
     "gelatin", "prostate", "storage renewal", "account locked",
@@ -81,7 +91,6 @@ SPAM_KEYWORDS = [
 ]
 
 def decode_mime_header(header):
-    """Decode MIME encoded email headers."""
     if not header:
         return ""
     parts = decode_header(header)
@@ -97,33 +106,29 @@ def decode_mime_header(header):
     return ' '.join(result)
 
 def is_spam(from_addr, subject):
-    """Check if email is likely spam."""
     combined = (from_addr + " " + subject).lower()
     return any(kw in combined for kw in SPAM_KEYWORDS)
 
 def check_emails():
-    """Pull emails from all Dovecot accounts on VPS."""
+    """Pull emails from all configured IMAP accounts."""
     all_emails = []
 
-    for account in MAIL_ACCOUNTS:
+    for account in CONFIG["mail_accounts"]:
         try:
-            # Connect via IMAP over SSH tunnel or direct SSL
-            mail = imaplib.IMAP4_SSL(account["server"], account["port"])
+            mail = imaplib.IMAP4_SSL(account["server"], account.get("port", 993))
             mail.login(account["user"], get_password(account["user"]))
             mail.select("INBOX")
 
-            # Get unread emails
             status, messages = mail.search(None, "UNSEEN")
             if status == "OK" and messages[0]:
                 msg_ids = messages[0].split()
-                for msg_id in msg_ids[-20:]:  # Last 20 unread
+                for msg_id in msg_ids[-20:]:
                     status, data = mail.fetch(msg_id, "(RFC822)")
                     if status == "OK":
                         msg = email.message_from_bytes(data[0][1])
                         from_addr = decode_mime_header(msg["From"])
                         subject = decode_mime_header(msg["Subject"])
                         date = msg["Date"]
-
                         spam = is_spam(from_addr, subject)
 
                         all_emails.append({
@@ -146,18 +151,24 @@ def check_emails():
                 "msg_id": "",
             })
 
-    # Sort: real emails first, then spam
     all_emails.sort(key=lambda x: (x["spam"], x["date"]), reverse=False)
-
     STATE["emails"] = all_emails
     STATE["email_count"] = len([e for e in all_emails if not e["spam"]])
     STATE["last_check"] = datetime.now().isoformat()
 
 def check_emails_ssh():
-    """Fallback: check emails via SSH to VPS (no IMAP password needed)."""
+    """Fallback: check emails by SSH'ing to a VPS running Dovecot+vhosts.
+    Walks /var/mail/vhosts/<domain>/<user>/Maildir/new/* on the remote side.
+    Requires SSH key auth (no password prompt)."""
+    if not CONFIG["vps_host"]:
+        STATE["emails"] = []
+        STATE["email_count"] = 0
+        STATE["last_check"] = datetime.now().isoformat()
+        return
     try:
         result = subprocess.run(
-            ["ssh", "-o", "ConnectTimeout=10", f"root@{VPS_HOST}",
+            ["ssh", "-o", "ConnectTimeout=10",
+             f"{CONFIG['vps_ssh_user']}@{CONFIG['vps_host']}",
              """
              for box in /var/mail/vhosts/*/; do
                  domain=$(basename "$box")
@@ -205,21 +216,31 @@ def check_emails_ssh():
         STATE["emails"] = [{"account": "error", "from": "SSH Error", "subject": str(e), "date": "", "spam": False, "msg_id": ""}]
 
 def get_password(user):
-    """Get email password from config."""
-    config_file = Path("/opt/qos/config/mail_passwords.json")
-    if not config_file.exists():
-        config_file = Path.home() / ".qos" / "mail_passwords.json"
-    if config_file.exists():
-        with open(config_file) as f:
-            passwords = json.load(f)
-        return passwords.get(user, "")
+    """Get email password from passwords file."""
+    candidates = []
+    if CONFIG.get("mail_passwords_file"):
+        candidates.append(Path(CONFIG["mail_passwords_file"]))
+    candidates.append(Path.home() / ".rmbr" / "mail_passwords.json")
+    for config_file in candidates:
+        if config_file.exists():
+            with open(config_file) as f:
+                passwords = json.load(f)
+            return passwords.get(user, "")
     return ""
 
 def set_balance(balance, next_bill=None):
-    """Manually set bank balance."""
     STATE["bank_balance"] = balance
     if next_bill:
         STATE["next_bill"] = next_bill
+
+def _kanban_html():
+    """Locate kanban.html — same dir as this script, or ./web/, or ../web/."""
+    here = Path(__file__).parent
+    for candidate in (here / "kanban.html", here / "web" / "kanban.html",
+                      here.parent / "web" / "kanban.html"):
+        if candidate.exists():
+            return candidate.read_text()
+    return DASHBOARD
 
 class RmbrHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
@@ -242,11 +263,7 @@ class RmbrHandler(BaseHTTPRequestHandler):
         elif self.path == "/old":
             self._html(DASHBOARD)
         elif self.path == "/":
-            kanban_path = Path(__file__).parent.parent / "web" / "kanban.html"
-            if kanban_path.exists():
-                self._html(kanban_path.read_text())
-            else:
-                self._html(DASHBOARD)
+            self._html(_kanban_html())
         else:
             self.send_error(404)
 
@@ -262,7 +279,6 @@ class RmbrHandler(BaseHTTPRequestHandler):
             data = json.loads(body)
             question = data.get("question", "")
 
-            # Build context from RMBR state
             context_parts = []
             if STATE["bank_balance"] is not None:
                 context_parts.append(f"Bank balance: ${STATE['bank_balance']:,}")
@@ -284,57 +300,47 @@ class RmbrHandler(BaseHTTPRequestHandler):
             context = "\n".join(context_parts)
             today = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
 
-            system_prompt = f"You are RMBR, a personal AI assistant running on QOS (Quantum Operating System). You have access to the user's real data. Today is {today}. Be concise and direct. Answer from the data below.\n\nCURRENT STATE:\n{context}"
+            system_prompt = f"You are RMBR, a personal life dashboard assistant. You have access to the user's real data. Today is {today}. Be concise and direct. Answer from the data below.\n\nCURRENT STATE:\n{context}"
 
             try:
-                if LLM_BACKEND == "anthropic":
-                    llm_body = json.dumps({
-                        "model": "claude-haiku-4-5-20251001",
-                        "max_tokens": 200,
-                        "system": system_prompt,
-                        "messages": [
-                            {"role": "user", "content": question}
-                        ]
-                    }).encode()
-                    req = urllib.request.Request(
-                        "https://api.anthropic.com/v1/messages",
-                        data=llm_body,
-                        headers={
-                            "Content-Type": "application/json",
-                            "x-api-key": ANTHROPIC_API_KEY,
-                            "anthropic-version": "2023-06-01"
-                        }
-                    )
-                    resp = urllib.request.urlopen(req, timeout=30)
-                    result = json.loads(resp.read())
-                    answer = result["content"][0]["text"]
-                else:
-                    llm_body = json.dumps({
-                        "model": "mlx-community/Qwen2.5-14B-Instruct-4bit",
-                        "messages": [
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": question}
-                        ],
-                        "max_tokens": 200
-                    }).encode()
-                    req = urllib.request.Request(
-                        "http://localhost:8003/v1/chat/completions",
-                        data=llm_body,
-                        headers={"Content-Type": "application/json"}
-                    )
-                    resp = urllib.request.urlopen(req, timeout=30)
-                    result = json.loads(resp.read())
-                    answer = result["choices"][0]["message"]["content"]
-
+                llm_body = json.dumps({
+                    "model": CONFIG["local_llm_model"],
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": question}
+                    ],
+                    "max_tokens": 200
+                }).encode()
+                req = urllib.request.Request(
+                    CONFIG["local_llm_url"],
+                    data=llm_body,
+                    headers={"Content-Type": "application/json"}
+                )
+                resp = urllib.request.urlopen(req, timeout=30)
+                result = json.loads(resp.read())
+                answer = result["choices"][0]["message"]["content"]
                 self._json({"answer": answer})
             except Exception as e:
-                self._json({"answer": f"LLM offline ({LLM_BACKEND}): {e}"})
+                self._json({"answer": f"LLM offline: {e}"})
         elif self.path == "/api/nuke":
-            # Delete all spam emails via SSH
+            if not CONFIG["vps_host"] or not CONFIG["mail_accounts"]:
+                self._json({"error": "vps_host + mail_accounts not configured"})
+                return
             try:
+                paths = []
+                for acct in CONFIG["mail_accounts"]:
+                    addr = acct["user"]
+                    if "@" not in addr:
+                        continue
+                    user_part, domain = addr.split("@", 1)
+                    paths.append(f"/var/mail/vhosts/{domain}/{user_part}/Maildir/new/*")
+                if not paths:
+                    self._json({"error": "no resolvable mailbox paths"})
+                    return
+                rm_cmd = "rm -f " + " ".join(paths)
                 subprocess.run(
-                    ["ssh", "-o", "ConnectTimeout=10", f"root@{VPS_HOST}",
-                     "rm -f /var/mail/vhosts/anticloud.pro/roy/Maildir/new/* /var/mail/vhosts/pepperpllc.com/contact/Maildir/new/* /var/mail/vhosts/simpl.studio/contact/Maildir/new/*"],
+                    ["ssh", "-o", "ConnectTimeout=10",
+                     f"{CONFIG['vps_ssh_user']}@{CONFIG['vps_host']}", rm_cmd],
                     capture_output=True, timeout=15
                 )
                 check_emails_ssh()
@@ -405,7 +411,7 @@ body { background:#0a0a0f; color:#e0e0e0; font-family:'SF Mono',Menlo,monospace;
 <body>
 
 <div class="header">
-    <div><div class="logo">RMBR <span>Quantum Operating System</span></div></div>
+    <div><div class="logo">RMBR <span>Life Dashboard</span></div></div>
     <div class="tagline">remembers everything you forget</div>
 </div>
 
@@ -472,7 +478,6 @@ async function loadStatus() {
             document.getElementById('nextBill').textContent = 'Next bill: ' + d.next_bill;
         }
 
-        // Calendar
         const cal = d.calendar || [];
         document.getElementById('calCount').textContent = cal.length + ' upcoming';
         let chtml = '';
@@ -547,10 +552,12 @@ setInterval(loadStatus, 60000);
 
 if __name__ == "__main__":
     print(f"  [RMBR] Dashboard on :{PORT}")
-    print(f"  [RMBR] LLM backend: {LLM_BACKEND}" + (" (Haiku 4.5)" if LLM_BACKEND == "anthropic" else " (local MLX)"))
-    print(f"  [RMBR] Checking emails via SSH to {VPS_HOST}")
+    print(f"  [RMBR] Local LLM: {CONFIG['local_llm_model']} @ {CONFIG['local_llm_url']}")
+    if CONFIG["vps_host"]:
+        print(f"  [RMBR] Mail check via SSH to {CONFIG['vps_host']}")
+    else:
+        print(f"  [RMBR] No vps_host configured — mail check disabled")
 
-    # Initial checks
     check_emails_ssh()
     check_calendar()
     print(f"  [RMBR] Found {STATE['email_count']} real emails, {len(STATE['emails']) - STATE['email_count']} spam")
