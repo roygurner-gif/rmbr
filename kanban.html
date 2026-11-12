@@ -256,6 +256,20 @@ body { background:#0a0a0f; color:#e0e0e0; font-family:'SF Mono',Menlo,monospace;
 </div>
 
 <script>
+// RMBR API: same-origin, custom header (CSRF guard) + optional token from #token=...
+const RMBR_TOKEN = (() => {
+    const m = location.hash.match(/token=([^&]+)/);
+    try {
+        if (m) { sessionStorage.setItem('rmbr_token', decodeURIComponent(m[1])); history.replaceState(null, '', location.pathname); }
+        return sessionStorage.getItem('rmbr_token') || '';
+    } catch (e) { return m ? decodeURIComponent(m[1]) : ''; }
+})();
+function api(path, opts = {}) {
+    const headers = Object.assign({'X-RMBR': '1'}, opts.headers || {});
+    if (RMBR_TOKEN) headers['X-RMBR-Token'] = RMBR_TOKEN;
+    return fetch(path, Object.assign({}, opts, {headers}));
+}
+
 // ============================================================
 // BOARD STATE -saved to localStorage
 // ============================================================
@@ -437,7 +451,7 @@ function saveEdit() {
 // ============================================================
 async function loadStatus() {
     try {
-        const r = await fetch('/api/status');
+        const r = await api('/api/status');
         const d = await r.json();
         if (d.bank_balance !== null) {
             document.getElementById('sBalance').textContent = '$' + d.bank_balance.toLocaleString();
@@ -467,7 +481,7 @@ async function askRmbr() {
     answer.textContent = 'thinking...';
     answer.style.color = '#f59e0b';
     try {
-        const r = await fetch('/api/ask', {
+        const r = await api('/api/ask', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({question: q})

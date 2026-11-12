@@ -71,7 +71,7 @@ Open <http://localhost:8889>.
 }
 ```
 
-Env overrides: `RMBR_PORT`, `RMBR_CONFIG`, `RMBR_VPS_HOST`.
+Env overrides: `RMBR_PORT`, `RMBR_CONFIG`, `RMBR_VPS_HOST`, `RMBR_HOST`, `RMBR_TOKEN`, `RMBR_ALLOWED_HOSTS` (see Security).
 
 ## API
 
@@ -86,7 +86,16 @@ Env overrides: `RMBR_PORT`, `RMBR_CONFIG`, `RMBR_VPS_HOST`.
 | `/api/refresh` | GET | Re-pull email + calendar |
 | `/api/balance` | POST | `{"balance": 4217, "next_bill": "AT&T $89 Jun 15"}` |
 | `/api/ask` | POST | `{"question": "what bills this week?"}` → LLM answer with full RMBR state as context |
-| `/api/nuke` | POST | ⚠️ Delete all unread mail in configured mailboxes via SSH |
+| `/api/nuke` | POST | Delete the unread messages RMBR classified as spam (only those Maildir files) via SSH |
+
+### Security
+
+RMBR holds your mail, calendar and balance, so it is locked to your machine by default:
+
+- Binds `127.0.0.1`. To reach it from the LAN set `RMBR_HOST=0.0.0.0` **and** `RMBR_TOKEN=<long random>` (it refuses to start without the token), then open `http://<host>:8889/#token=<token>` once; the page keeps it for the session. Add the name you browse to in `RMBR_ALLOWED_HOSTS` (e.g. `rmbr.lan,192.168.0.10`).
+- Every `/api/*` call needs the `X-RMBR: 1` header (the dashboard sends it). Other websites can't add it without a CORS preflight RMBR never approves, so a page you visit can't read your data or press Nuke. No `Access-Control-Allow-Origin` is sent.
+- The `Host` header must be this machine (loopback, `RMBR_HOST`, or `RMBR_ALLOWED_HOSTS`), which blocks DNS-rebinding.
+- Nuke deletes only files it listed and classified as spam, validated against the Maildir layout and shell-quoted.
 
 ## Why not Trello / Notion / Todoist?
 

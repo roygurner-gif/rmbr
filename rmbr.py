@@ -12,13 +12,25 @@ import time
 import imaplib
 import email
 import subprocess
+import re
 import urllib.request
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
+import hmac
+import ipaddress
+import shlex
 from pathlib import Path
 from email.header import decode_header
 
 PORT = int(os.environ.get("RMBR_PORT", "8889"))
+# Loopback by default. Binding anything else requires RMBR_TOKEN (checked at startup).
+HOST = os.environ.get("RMBR_HOST", "127.0.0.1")
+TOKEN = os.environ.get("RMBR_TOKEN", "")
+# Extra Host-header names to accept (e.g. "rmbr.lan,192.168.0.10"); loopback names always pass.
+ALLOWED_HOSTS = {h.strip().lower() for h in os.environ.get("RMBR_ALLOWED_HOSTS", "").split(",") if h.strip()}
+MAX_BODY = 64 * 1024
+# Only files under this Maildir layout can ever be deleted by /api/nuke.
+_MAILDIR_FILE = re.compile(r"^/var/mail/vhosts/[A-Za-z0-9.-]+/[A-Za-z0-9._+-]+/Maildir/new/[A-Za-z0-9._,:=-]+$")
 REFRESH_INTERVAL = 300  # 5 minutes
 
 CONFIG_PATH = Path(os.environ.get("RMBR_CONFIG", str(Path.home() / ".rmbr" / "config.json")))
@@ -178,7 +190,7 @@ def check_emails_ssh():
                          [ -f "$f" ] || continue
                          from=$(grep -m1 "^From:" "$f" 2>/dev/null | head -c 80)
                          subj=$(grep -m1 "^Subject:" "$f" 2>/dev/null | head -c 80)
-                         echo "${uname}@${domain}|${from}|${subj}"
+                         echo "${uname}@${domain}|${f}|${from}|${subj}"
                      done
                  done
              done
@@ -190,12 +202,12 @@ def check_emails_ssh():
         for line in result.stdout.strip().split('\n'):
             if '|' not in line:
                 continue
-            parts = line.split('|', 2)
-            if len(parts) < 3:
+            parts = line.split('|', 3)
+            if len(parts) < 4:
                 continue
-            account = parts[0]
-            from_addr = parts[1].replace("From: ", "")[:60]
-            subject = parts[2].replace("Subject: ", "")[:80]
+            account, path = parts[0], parts[1]
+            from_addr = parts[2].replace("From: ", "")[:60]
+            subject = parts[3].replace("Subject: ", "")[:80]
             spam = is_spam(from_addr, subject)
 
             all_emails.append({
@@ -205,6 +217,7 @@ def check_emails_ssh():
                 "date": "",
                 "spam": spam,
                 "msg_id": "",
+                "_path": path,   # server-side only; stripped from API responses
             })
 
         all_emails.sort(key=lambda x: x["spam"])
@@ -242,18 +255,99 @@ def _kanban_html():
             return candidate.read_text()
     return DASHBOARD
 
+def spam_paths(emails):
+    """Maildir files of messages classified as spam — the only thing /api/nuke deletes."""
+    return [e["_path"] for e in emails
+            if e.get("spam") and _MAILDIR_FILE.match(e.get("_path") or "")]
+
+
+def public_emails(emails):
+    return [{k: v for k, v in e.items() if not k.startswith("_")} for e in emails]
+
+
+def public_state():
+    return {**STATE, "emails": public_emails(STATE["emails"])}
+
+
+def host_allowed(host_header, bind_host=None):
+    """Reject DNS-rebinding: the Host header must name this machine, not some attacker domain."""
+    if not host_header:
+        return False
+    h = host_header.strip().lower()
+    if h.startswith("["):
+        h = h[1:h.find("]")] if "]" in h else h
+    elif h.count(":") == 1:
+        h = h.rsplit(":", 1)[0]
+    if h in ("localhost", "127.0.0.1", "::1") or h in ALLOWED_HOSTS:
+        return True
+    if bind_host and h == bind_host.lower():
+        return True
+    try:
+        return ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        return False
+
+
+def is_loopback_bind(host):
+    if host in ("localhost",):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 class RmbrHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
+    def _guard(self):
+        """
+        Every request: Host must be ours (blocks DNS rebinding).
+        Every /api call: must carry X-RMBR (a custom header, so other origins
+        can't send it without a CORS preflight we never approve — blocks CSRF
+        and cross-site reads), plus the token when RMBR_TOKEN is set.
+        """
+        if not host_allowed(self.headers.get("Host"), HOST):
+            self.send_error(403, "Host not allowed")
+            return False
+        if self.path.startswith("/api/"):
+            if self.headers.get("X-RMBR") != "1":
+                self.send_error(403, "Missing X-RMBR header")
+                return False
+            if TOKEN and not hmac.compare_digest(self.headers.get("X-RMBR-Token", ""), TOKEN):
+                self.send_error(401, "Bad or missing token")
+                return False
+        return True
+
+    def _body_json(self):
+        try:
+            n = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            n = -1
+        if n < 0 or n > MAX_BODY:
+            self._json({"error": "body too large"}, 413)
+            return None
+        try:
+            data = json.loads(self.rfile.read(n) or b"{}")
+        except json.JSONDecodeError:
+            self._json({"error": "invalid JSON"}, 400)
+            return None
+        if not isinstance(data, dict):
+            self._json({"error": "expected a JSON object"}, 400)
+            return None
+        return data
+
     def do_GET(self):
+        if not self._guard():
+            return
         if self.path == "/api/emails":
-            self._json({"emails": STATE["emails"], "count": STATE["email_count"], "last_check": STATE["last_check"]})
+            self._json({"emails": public_emails(STATE["emails"]), "count": STATE["email_count"], "last_check": STATE["last_check"]})
         elif self.path == "/api/calendar":
             check_calendar()
             self._json({"events": STATE["calendar"]})
         elif self.path == "/api/status":
-            self._json(STATE)
+            self._json(public_state())
         elif self.path == "/api/refresh":
             check_emails_ssh()
             check_calendar()
@@ -268,16 +362,20 @@ class RmbrHandler(BaseHTTPRequestHandler):
             self.send_error(404)
 
     def do_POST(self):
-        content_length = int(self.headers.get('Content-Length', 0))
-        body = self.rfile.read(content_length)
+        if not self._guard():
+            return
+        if self.path not in ("/api/balance", "/api/ask", "/api/nuke"):
+            self.send_error(404)
+            return
+        data = self._body_json()
+        if data is None:
+            return
 
         if self.path == "/api/balance":
-            data = json.loads(body)
             set_balance(data.get("balance"), data.get("next_bill"))
             self._json({"updated": True})
         elif self.path == "/api/ask":
-            data = json.loads(body)
-            question = data.get("question", "")
+            question = str(data.get("question", ""))[:2000]
 
             context_parts = []
             if STATE["bank_balance"] is not None:
@@ -323,38 +421,32 @@ class RmbrHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._json({"answer": f"LLM offline: {e}"})
         elif self.path == "/api/nuke":
-            if not CONFIG["vps_host"] or not CONFIG["mail_accounts"]:
-                self._json({"error": "vps_host + mail_accounts not configured"})
+            if not CONFIG["vps_host"]:
+                self._json({"error": "vps_host not configured"}, 400)
+                return
+            targets = spam_paths(STATE["emails"])
+            if not targets:
+                self._json({"nuked": 0, "remaining": STATE["email_count"]})
                 return
             try:
-                paths = []
-                for acct in CONFIG["mail_accounts"]:
-                    addr = acct["user"]
-                    if "@" not in addr:
-                        continue
-                    user_part, domain = addr.split("@", 1)
-                    paths.append(f"/var/mail/vhosts/{domain}/{user_part}/Maildir/new/*")
-                if not paths:
-                    self._json({"error": "no resolvable mailbox paths"})
-                    return
-                rm_cmd = "rm -f " + " ".join(paths)
                 subprocess.run(
                     ["ssh", "-o", "ConnectTimeout=10",
-                     f"{CONFIG['vps_ssh_user']}@{CONFIG['vps_host']}", rm_cmd],
+                     f"{CONFIG['vps_ssh_user']}@{CONFIG['vps_host']}",
+                     "rm -f -- " + " ".join(shlex.quote(t) for t in targets)],
                     capture_output=True, timeout=15
                 )
                 check_emails_ssh()
-                self._json({"nuked": True, "remaining": STATE["email_count"]})
+                self._json({"nuked": len(targets), "remaining": STATE["email_count"]})
             except Exception as e:
-                self._json({"error": str(e)})
+                self._json({"error": str(e)}, 500)
         else:
             self.send_error(404)
 
-    def _json(self, data):
+    def _json(self, data, status=200):
         body = json.dumps(data).encode()
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
 
@@ -461,9 +553,23 @@ body { background:#0a0a0f; color:#e0e0e0; font-family:'SF Mono',Menlo,monospace;
 <div class="footer">RMBR — because you forgot again</div>
 
 <script>
+// RMBR API: same-origin, custom header (CSRF guard) + optional token from #token=...
+const RMBR_TOKEN = (() => {
+    const m = location.hash.match(/token=([^&]+)/);
+    try {
+        if (m) { sessionStorage.setItem('rmbr_token', decodeURIComponent(m[1])); history.replaceState(null, '', location.pathname); }
+        return sessionStorage.getItem('rmbr_token') || '';
+    } catch (e) { return m ? decodeURIComponent(m[1]) : ''; }
+})();
+function api(path, opts = {}) {
+    const headers = Object.assign({'X-RMBR': '1'}, opts.headers || {});
+    if (RMBR_TOKEN) headers['X-RMBR-Token'] = RMBR_TOKEN;
+    return fetch(path, Object.assign({}, opts, {headers}));
+}
+
 async function loadStatus() {
     try {
-        const r = await fetch('/api/status');
+        const r = await api('/api/status');
         const d = await r.json();
 
         if (d.bank_balance !== null) {
@@ -510,13 +616,13 @@ async function loadStatus() {
 
 async function refreshEmails() {
     document.getElementById('emailCount').textContent = 'checking...';
-    await fetch('/api/refresh');
+    await api('/api/refresh');
     loadStatus();
 }
 
 async function nukeSpam() {
     if (confirm('Nuke all emails?')) {
-        await fetch('/api/nuke', {method: 'POST'});
+        await api('/api/nuke', {method: 'POST'});
         loadStatus();
     }
 }
@@ -529,7 +635,7 @@ async function askRmbr() {
     answer.textContent = 'thinking...';
     answer.style.color = '#f59e0b';
     try {
-        const r = await fetch('/api/ask', {
+        const r = await api('/api/ask', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({question: q})
@@ -551,7 +657,10 @@ setInterval(loadStatus, 60000);
 </html>"""
 
 if __name__ == "__main__":
-    print(f"  [RMBR] Dashboard on :{PORT}")
+    if not is_loopback_bind(HOST) and not TOKEN:
+        sys.exit(f"  [RMBR] refusing to bind {HOST} without RMBR_TOKEN — your mail, calendar "
+                 "and balance would be open to the network. Set RMBR_TOKEN or use 127.0.0.1.")
+    print(f"  [RMBR] Dashboard on http://{HOST}:{PORT}" + ("  (token required: open /#token=...)" if TOKEN else ""))
     print(f"  [RMBR] Local LLM: {CONFIG['local_llm_model']} @ {CONFIG['local_llm_url']}")
     if CONFIG["vps_host"]:
         print(f"  [RMBR] Mail check via SSH to {CONFIG['vps_host']}")
@@ -563,7 +672,7 @@ if __name__ == "__main__":
     print(f"  [RMBR] Found {STATE['email_count']} real emails, {len(STATE['emails']) - STATE['email_count']} spam")
     print(f"  [RMBR] Found {len(STATE['calendar'])} calendar events")
 
-    server = HTTPServer(("0.0.0.0", PORT), RmbrHandler)
+    server = HTTPServer((HOST, PORT), RmbrHandler)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
